@@ -1,0 +1,5 @@
+# @package eval.metrics
+auroc_micro:
+  _target_: src.metrics.torchmetrics_classification.MyAUROC
+  num_classes: ${datamodule.__num_labels}
+  average: micro

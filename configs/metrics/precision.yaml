@@ -1,0 +1,7 @@
+# @package eval.metrics
+precision_at_k:
+  _target_: src.metrics.torchmetrics_classification.MyPrecision
+  num_classes: ${datamodule.__num_labels}
+  average: micro
+  top_k: 5
+  threshold: 0.0

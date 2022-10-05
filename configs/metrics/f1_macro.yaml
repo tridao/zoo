@@ -1,0 +1,7 @@
+# @package eval.metrics
+# torchmetrics.F1Score(average='macro', num_classes=num_labels)
+f1_macro:
+  _target_: src.metrics.torchmetrics_classification.MyF1Score
+  threshold: 0.0
+  average: macro
+  num_classes: ${datamodule.__num_labels} # datamodule needs this param

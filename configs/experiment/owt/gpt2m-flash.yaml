@@ -1,0 +1,16 @@
+# @package _global_
+defaults:
+  - /experiment/owt/gpt2s-flash.yaml
+  - override /model/gpt2model: gpt2-medium
+
+model:
+  config:
+    mlp_checkpoint_lvl: 1  # To fit batch_size 32
+
+datamodule:
+  # batch_size: 32
+  batch_size: ${eval:"8 if ${train.gpu_mem} < 24 else (16 if ${train.gpu_mem} < 40 else 32)"}
+
+train:
+  optimizer:
+    lr: 1.5e-4

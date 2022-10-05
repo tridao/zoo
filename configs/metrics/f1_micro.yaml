@@ -1,0 +1,5 @@
+# @package eval.metrics
+# torchmetrics.F1Score(average='micro')
+f1_micro:
+  _target_: src.metrics.torchmetrics_classification.MyF1Score
+  threshold: 0.0
