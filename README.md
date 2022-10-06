@@ -1,9 +1,11 @@
 We use the template from `https://github.com/ashleve/lightning-hydra-template`.
 Please read the instructions there to understand the repo structure.
 
-To run the GPT2 experiments with 8 GPUs:
+To train GPT2 on Openwebtext with 8 GPUs:
 ```sh
 python run.py experiment=owt/gpt2s-flash trainer.devices=8
+python run.py experiment=owt/gpt2m-flash trainer.devices=8
+python run.py experiment=owt/gpt2l-flash trainer.devices=8
 ```
 
 ## Requirements
