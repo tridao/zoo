@@ -1,9 +1,9 @@
 We use the template from `https://github.com/ashleve/lightning-hydra-template`.
 Please read the instructions there to understand the repo structure.
 
-To run the GPT2 experiments:
+To run the GPT2 experiments with 8 GPUs:
 ```sh
-python run.py experiment=owt/gpt2s-flash
+python run.py experiment=owt/gpt2s-flash trainer.devices=8
 ```
 
 ## Requirements
