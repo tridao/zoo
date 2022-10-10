@@ -2,6 +2,7 @@
 #include "ln_utils.cuh"
 #include "ln_kernel_traits.h"
 #include "ln_bwd_kernels.cuh"
+#include "static_switch.h"
 
 using namespace layer_norm;
 
@@ -35,59 +36,61 @@ void launch_(LaunchParams<BwdParams> &launch_params, const bool configure_params
                                         >;
     bool is_dropout = launch_params.params.dropout_keep_p < 1.f;
     bool has_residual = launch_params.params.dx1 != nullptr;
-    auto kernel = prenorm
-        ? (is_dropout
-            ? (has_residual ? &ln_bwd_kernel<Kernel_traits, true, true, true> : &ln_bwd_kernel<Kernel_traits, true, true, false>)
-            : (has_residual ? &ln_bwd_kernel<Kernel_traits, true, false, true> : &ln_bwd_kernel<Kernel_traits, true, false, false>))
-        : (is_dropout
-            ? (has_residual ? &ln_bwd_kernel<Kernel_traits, false, true, true> : &ln_bwd_kernel<Kernel_traits, false, true, false>)
-            : (has_residual ? &ln_bwd_kernel<Kernel_traits, false, false, true> : &ln_bwd_kernel<Kernel_traits, false, false, false>));
+    bool has_rowscale = launch_params.params.rowscale != nullptr;
+    BOOL_SWITCH(prenorm, PrenormConst, [&] {
+        BOOL_SWITCH(is_dropout, IsDropoutConst, [&] {
+            BOOL_SWITCH(has_residual, HasResidualConst, [&] {
+                BOOL_SWITCH(has_rowscale, HasRowscaleConst, [&] {
+                    auto kernel = &ln_bwd_kernel<Kernel_traits, PrenormConst, IsDropoutConst, HasResidualConst, HasRowscaleConst>;
+                    if( configure_params ) {
+                        int ctas_per_sm;
+                        cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                            &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES);
+                        launch_params.params.ctas_per_col = launch_params.props->multiProcessorCount * ctas_per_sm / Kernel_traits::CTAS_PER_ROW;
+                        launch_params.barrier_size = 0;
+                        launch_params.workspace_bytes = 0;
+                        if(Kernel_traits::CTAS_PER_ROW > 1) {
+                            launch_params.barrier_size = 2 * launch_params.params.ctas_per_col;
+                            launch_params.workspace_bytes = launch_params.params.ctas_per_col
+                                                          * Kernel_traits::WARPS_M
+                                                          * Kernel_traits::CTAS_PER_ROW
+                                                          * sizeof(typename Kernel_traits::reduce_t)
+                                                          * 2;
+                        }
+                        return;
+                    }
 
-    if( configure_params ) {
-        int ctas_per_sm;
-        cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-            &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES);
-        launch_params.params.ctas_per_col = launch_params.props->multiProcessorCount * ctas_per_sm / Kernel_traits::CTAS_PER_ROW;
-        launch_params.barrier_size = 0;
-        launch_params.workspace_bytes = 0;
-        if(Kernel_traits::CTAS_PER_ROW > 1) {
-            launch_params.barrier_size = 2 * launch_params.params.ctas_per_col;
-            launch_params.workspace_bytes = launch_params.params.ctas_per_col 
-                                          * Kernel_traits::WARPS_M  
-                                          * Kernel_traits::CTAS_PER_ROW 
-                                          * sizeof(typename Kernel_traits::reduce_t)
-                                          * 2;
-        }
-        return;
-    }
+                    if( Kernel_traits::SMEM_BYTES >= 48 * 1024 ) {
+                        CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel_traits::SMEM_BYTES));
+                    }
+                    auto stream = launch_params.stream;
+                    auto ctas_per_col = launch_params.params.ctas_per_col;
 
-    if( Kernel_traits::SMEM_BYTES >= 48 * 1024 ) {
-        CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel_traits::SMEM_BYTES));
-    }
-    auto stream = launch_params.stream;
-    auto ctas_per_col = launch_params.params.ctas_per_col;
+                    if( Kernel_traits::CTAS_PER_ROW == 1 ) {
+                        kernel<<<ctas_per_col, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES, stream>>>(launch_params.params);
+                    } else {
+                        dim3 grid(Kernel_traits::CTAS_PER_ROW * ctas_per_col);
+                        dim3 block(Kernel_traits::THREADS_PER_CTA);
+                        void *params_ = (void *)&launch_params.params;
+                        cudaLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_, Kernel_traits::SMEM_BYTES, stream);
+                    }
 
-    if( Kernel_traits::CTAS_PER_ROW == 1 ) {
-        kernel<<<ctas_per_col, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES, stream>>>(launch_params.params);
-    } else {
-        dim3 grid(Kernel_traits::CTAS_PER_ROW * ctas_per_col);
-        dim3 block(Kernel_traits::THREADS_PER_CTA);
-        void *params_ = (void *)&launch_params.params;
-        cudaLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_, Kernel_traits::SMEM_BYTES, stream);
-    }
+                    using Kernel_traits_f = layer_norm::Kernel_traits_finalize<HIDDEN_SIZE,
+                                                                              weight_t,
+                                                                              input_t,
+                                                                              residual_t,
+                                                                              output_t,
+                                                                              compute_t,
+                                                                              index_t,
+                                                                              32 * 32,  // THREADS_PER_CTA
+                                                                              BYTES_PER_LDG_FINAL>;
 
-    using Kernel_traits_f = layer_norm::Kernel_traits_finalize<HIDDEN_SIZE,
-                                                               weight_t,
-                                                               input_t,
-                                                               residual_t,
-                                                               output_t,
-                                                               compute_t,
-                                                               index_t,
-                                                               32 * 32,  // THREADS_PER_CTA
-                                                               BYTES_PER_LDG_FINAL>;
-
-    auto kernel_f = &layer_norm::ln_bwd_finalize_kernel<Kernel_traits_f>;
-    kernel_f<<<Kernel_traits_f::CTAS, Kernel_traits_f::THREADS_PER_CTA, 0, stream>>>(launch_params.params);
+                    auto kernel_f = &layer_norm::ln_bwd_finalize_kernel<Kernel_traits_f>;
+                    kernel_f<<<Kernel_traits_f::CTAS, Kernel_traits_f::THREADS_PER_CTA, 0, stream>>>(launch_params.params);
+                });
+            });
+        });
+    });
 }
 
 // Create backward launch function and register. Macro signature:

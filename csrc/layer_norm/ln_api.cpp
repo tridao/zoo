@@ -83,6 +83,7 @@ std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: 
                                            c10::optional<const at::Tensor> &x1_,      // Residual: BxSxhidden_size
                                            const at::Tensor &gamma,   // hidden_size
                                            const at::Tensor &beta,   // hidden_size
+                                           c10::optional<const at::Tensor> &rowscale_,      // BxS
                                            const float dropout_p,
                                            const float epsilon,
                                            c10::optional<at::Generator> gen_,
@@ -107,6 +108,10 @@ std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: 
     auto sizes = x0.sizes();
     TORCH_CHECK(sizes.size() == 2);
 
+    const int rows = sizes[0];
+    const int cols = sizes[1];
+    auto hidden_size = gamma.numel();
+
     if (x1_.has_value()) {
         auto x1 = x1_.value();
         TORCH_CHECK(x1.is_cuda())
@@ -114,9 +119,13 @@ std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: 
         TORCH_CHECK(x1.sizes() == sizes);
     }
 
-    const int rows = sizes[0];
-    const int cols = sizes[1];
-    auto hidden_size = gamma.numel();
+    if (rowscale_.has_value()) {
+        auto rowscale = rowscale_.value();
+        TORCH_CHECK(rowscale.is_cuda())
+        TORCH_CHECK(rowscale.is_contiguous());
+        TORCH_CHECK(rowscale.sizes() == std::vector<int64_t>{rows});
+        TORCH_CHECK(rowscale.scalar_type() == itype);
+    }
 
     TORCH_CHECK(gamma.sizes() == beta.sizes());
     TORCH_CHECK(hidden_size == cols);
@@ -142,6 +151,7 @@ std::vector<at::Tensor> dropout_add_ln_fwd(const at::Tensor &x0,      // Input: 
     TORCH_CHECK(dropout_p < 1.f);
     launch_params.params.dropout_keep_p = 1.f - dropout_p;
     launch_params.params.x1 = x1_.has_value() ? x1_.value().data_ptr() : nullptr;
+    launch_params.params.rowscale = rowscale_.has_value() ? rowscale_.value().data_ptr() : nullptr;
 
     auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
         gen_, at::cuda::detail::getDefaultCUDAGenerator());
@@ -203,6 +213,7 @@ std::vector<at::Tensor> dropout_add_ln_bwd(const at::Tensor &dz,     // BxSxhidd
                                            const at::Tensor &mu,     // BxS, FP32!
                                            const at::Tensor &rsigma, // BxS, FP32!
                                            const at::Tensor &gamma,   // hidden_size
+                                           c10::optional<const at::Tensor> &rowscale_,      // BxS
                                            const float dropout_p,
                                            const bool has_residual
 ) {
@@ -243,6 +254,14 @@ std::vector<at::Tensor> dropout_add_ln_bwd(const at::Tensor &dz,     // BxSxhidd
         TORCH_CHECK(dmask.sizes() == sizes);
     }
 
+    if (rowscale_.has_value()) {
+        auto rowscale = rowscale_.value();
+        TORCH_CHECK(rowscale.is_cuda())
+        TORCH_CHECK(rowscale.is_contiguous());
+        TORCH_CHECK(rowscale.sizes() == std::vector<int64_t>{rows});
+        TORCH_CHECK(rowscale.scalar_type() == itype);
+    }
+
     auto hidden_size = gamma.numel();
 
     TORCH_CHECK(mu.numel() == rows);
@@ -264,6 +283,7 @@ std::vector<at::Tensor> dropout_add_ln_bwd(const at::Tensor &dz,     // BxSxhidd
     TORCH_CHECK(dropout_p < 1.f);
     launch_params.params.dropout_keep_p = 1.f - dropout_p;
     launch_params.params.dx1 = has_residual ? dx1.data_ptr() : nullptr;
+    launch_params.params.rowscale = rowscale_.has_value() ? rowscale_.value().data_ptr() : nullptr;
 
     auto launcher = get_bwd_launcher(wtype, itype, rtype, otype, ctype, hidden_size);
 
@@ -311,6 +331,7 @@ std::vector<at::Tensor> dropout_add_ln_prenorm_bwd(const at::Tensor &dz,     // 
                                                    const at::Tensor &mu,     // BxS, FP32!
                                                    const at::Tensor &rsigma, // BxS, FP32!
                                                    const at::Tensor &gamma,   // hidden_size
+                                                   c10::optional<const at::Tensor> &rowscale_,      // BxS
                                                    const float dropout_p,
                                                    const bool has_residual
 ) {
@@ -355,6 +376,14 @@ std::vector<at::Tensor> dropout_add_ln_prenorm_bwd(const at::Tensor &dz,     // 
         TORCH_CHECK(dmask.sizes() == sizes);
     }
 
+    if (rowscale_.has_value()) {
+        auto rowscale = rowscale_.value();
+        TORCH_CHECK(rowscale.is_cuda())
+        TORCH_CHECK(rowscale.is_contiguous());
+        TORCH_CHECK(rowscale.sizes() == std::vector<int64_t>{rows});
+        TORCH_CHECK(rowscale.scalar_type() == itype);
+    }
+
     auto hidden_size = gamma.numel();
 
     TORCH_CHECK(mu.numel() == rows);
@@ -376,6 +405,7 @@ std::vector<at::Tensor> dropout_add_ln_prenorm_bwd(const at::Tensor &dz,     // 
     TORCH_CHECK(dropout_p < 1.f);
     launch_params.params.dropout_keep_p = 1.f - dropout_p;
     launch_params.params.dx1 = has_residual ? dx1.data_ptr() : nullptr;
+    launch_params.params.rowscale = rowscale_.has_value() ? rowscale_.value().data_ptr() : nullptr;
 
     // TODO: how to set template param for launcher
     auto launcher = get_bwd_launcher(wtype, itype, rtype, otype, ctype, hidden_size);

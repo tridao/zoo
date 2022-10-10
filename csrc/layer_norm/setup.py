@@ -98,7 +98,10 @@ if os.path.exists(os.path.join(torch_dir, "include", "ATen", "CUDAGeneratorImpl.
 raise_if_cuda_home_none("--fast_layer_norm")
 # Check, if CUDA11 is installed for compute capability 8.0
 cc_flag = []
-cc_flag.append("-arch=compute_70")
+# cc_flag.append("-gencode")
+# cc_flag.append("arch=compute_70,code=sm_70")
+cc_flag.append("-gencode")
+cc_flag.append("arch=compute_80,code=sm_80")
 
 ext_modules.append(
     CUDAExtension(
@@ -113,8 +116,6 @@ ext_modules.append(
             "nvcc": append_nvcc_threads(
                 [
                     "-O3",
-                    "-gencode",
-                    "arch=compute_70,code=sm_70",
                     "-U__CUDA_NO_HALF_OPERATORS__",
                     "-U__CUDA_NO_HALF_CONVERSIONS__",
                     "-U__CUDA_NO_BFLOAT16_OPERATORS__",

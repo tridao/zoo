@@ -13,7 +13,7 @@
 
 namespace layer_norm {
 
-template<typename Ktraits, bool Is_dropout, bool Has_residual>
+template<typename Ktraits, bool Is_dropout, bool Has_residual, bool Has_rowscale>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) 
 void ln_fwd_kernel(FwdParams params) {
 
@@ -63,6 +63,8 @@ void ln_fwd_kernel(FwdParams params) {
     compute_t *mu_ptr = static_cast<compute_t *>(params.mu);
     compute_t *rs_ptr = static_cast<compute_t *>(params.rs);
 
+    const input_t *rowscale = static_cast<input_t *>(params.rowscale);
+
     // https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/native/cuda/Dropout.cu
     curandStatePhilox4_32_10_t state;
     if (Is_dropout) {
@@ -84,6 +86,7 @@ void ln_fwd_kernel(FwdParams params) {
     constexpr compute_t rn = 1.f / compute_t(Ktraits::COLS);
 
     for( int row = r; row < params.rows; row += params.ctas_per_col * ROWS_PER_CTA ) {
+        const compute_t rowscale_val = Has_rowscale ? compute_t(rowscale[row]) : 1.0f;
         Ivec x0[LDGS];
         Rvec x1[LDGS];
         Rvec x[LDGS];
@@ -103,7 +106,7 @@ void ln_fwd_kernel(FwdParams params) {
                     float rand = curand_uniform(&state);
                     keep = mask_t(rand <= params.dropout_keep_p);
                 }
-                compute_t x0_ij = compute_t(x0[it].data.elt[jt]);
+                compute_t x0_ij = Has_rowscale ? compute_t(x0[it].data.elt[jt]) * rowscale_val : compute_t(x0[it].data.elt[jt]);
                 compute_t x_ij;
                 if (Has_residual) {
                     compute_t x1_ij = compute_t(x1[it].data.elt[jt]);

@@ -2,6 +2,7 @@
 #include "ln_utils.cuh"
 #include "ln_kernel_traits.h"
 #include "ln_fwd_kernels.cuh"
+#include "static_switch.h"
 
 using namespace layer_norm;
 
@@ -33,45 +34,48 @@ void launch_(LaunchParams<FwdParams> &launch_params, const bool configure_params
                                         BYTES_PER_LDG
                                         >;
     bool has_residual = launch_params.params.x1 != nullptr;
-    auto kernel = launch_params.params.dropout_keep_p < 1.f
-        ? (has_residual ? &ln_fwd_kernel<Kernel_traits, true, true> : &ln_fwd_kernel<Kernel_traits, true, false>)
-        : (has_residual ? &ln_fwd_kernel<Kernel_traits, false, true> : &ln_fwd_kernel<Kernel_traits, false, false>);
+    bool has_rowscale = launch_params.params.rowscale != nullptr;
+    BOOL_SWITCH(launch_params.params.dropout_keep_p < 1.f, IsDropoutConst, [&] {
+        BOOL_SWITCH(has_residual, HasResidualConst, [&] {
+            BOOL_SWITCH(has_rowscale, HasRowscaleConst, [&] {
+                auto kernel = &ln_fwd_kernel<Kernel_traits, IsDropoutConst, HasResidualConst, HasRowscaleConst>;
+                if( configure_params ) {
+                    int ctas_per_sm;
+                    cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+                        &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES_FWD);
+                    launch_params.params.ctas_per_col = launch_params.props->multiProcessorCount * ctas_per_sm / Kernel_traits::CTAS_PER_ROW;
+                    const size_t rows_per_loop = launch_params.params.ctas_per_col * Kernel_traits::ROWS_PER_CTA;
+                    launch_params.elts_per_thread = (launch_params.params.rows + rows_per_loop - 1) / rows_per_loop * Kernel_traits::LDGS * Kernel_traits::NUM_ELTS;
+                    launch_params.barrier_size = 0;
+                    launch_params.workspace_bytes = 0;
+                    if(Kernel_traits::CTAS_PER_ROW > 1) {
+                        launch_params.barrier_size = 2 * launch_params.params.ctas_per_col;
+                        launch_params.workspace_bytes = launch_params.params.ctas_per_col
+                                                      * Kernel_traits::WARPS_M
+                                                      * Kernel_traits::CTAS_PER_ROW
+                                                      * sizeof(typename Kernel_traits::Stats::stats_t)
+                                                      * 2;
+                    }
+                    return;
+                }
 
-    if( configure_params ) {
-        int ctas_per_sm;
-        cudaError status_ = cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-            &ctas_per_sm, kernel, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES_FWD);
-        launch_params.params.ctas_per_col = launch_params.props->multiProcessorCount * ctas_per_sm / Kernel_traits::CTAS_PER_ROW;
-        const size_t rows_per_loop = launch_params.params.ctas_per_col * Kernel_traits::ROWS_PER_CTA;
-        launch_params.elts_per_thread = (launch_params.params.rows + rows_per_loop - 1) / rows_per_loop * Kernel_traits::LDGS * Kernel_traits::NUM_ELTS;
-        launch_params.barrier_size = 0;
-        launch_params.workspace_bytes = 0;
-        if(Kernel_traits::CTAS_PER_ROW > 1) {
-            launch_params.barrier_size = 2 * launch_params.params.ctas_per_col;
-            launch_params.workspace_bytes = launch_params.params.ctas_per_col 
-                                          * Kernel_traits::WARPS_M  
-                                          * Kernel_traits::CTAS_PER_ROW 
-                                          * sizeof(typename Kernel_traits::Stats::stats_t)
-                                          * 2;
-        }
-        return;
-    }
+                if( Kernel_traits::SMEM_BYTES_FWD >= 48 * 1024 ) {
+                    CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel_traits::SMEM_BYTES_FWD));
+                }
+                auto stream = launch_params.stream;
+                auto ctas_per_col = launch_params.params.ctas_per_col;
 
-    if( Kernel_traits::SMEM_BYTES_FWD >= 48 * 1024 ) {
-        CHECK_CUDA(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, Kernel_traits::SMEM_BYTES_FWD));
-    }
-    auto stream = launch_params.stream;
-    auto ctas_per_col = launch_params.params.ctas_per_col;
-
-    if( Kernel_traits::CTAS_PER_ROW == 1 ) {
-        kernel<<<ctas_per_col, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES_FWD, stream>>>(launch_params.params);
-    } else {
-        dim3 grid(Kernel_traits::CTAS_PER_ROW * ctas_per_col);
-        dim3 block(Kernel_traits::THREADS_PER_CTA);
-        void *params_ = (void *)&launch_params.params;
-        cudaLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_, Kernel_traits::SMEM_BYTES_FWD, stream);
-    }
-
+                if( Kernel_traits::CTAS_PER_ROW == 1 ) {
+                    kernel<<<ctas_per_col, Kernel_traits::THREADS_PER_CTA, Kernel_traits::SMEM_BYTES_FWD, stream>>>(launch_params.params);
+                } else {
+                    dim3 grid(Kernel_traits::CTAS_PER_ROW * ctas_per_col);
+                    dim3 block(Kernel_traits::THREADS_PER_CTA);
+                    void *params_ = (void *)&launch_params.params;
+                    cudaLaunchCooperativeKernel((void *)kernel, grid, block, (void **)&params_, Kernel_traits::SMEM_BYTES_FWD, stream);
+                }
+            });
+        });
+    });
 }
 
 // Create forward launch function and register. Macro signature:

@@ -8,6 +8,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from torchvision.ops import StochasticDepth
+
 from src.models.modules.mha import MHA
 from src.models.modules.mlp import Mlp
 
@@ -20,7 +22,7 @@ except ImportError:
 class Block(nn.Module):
 
     def __init__(self, dim, mixer_cls=None, mlp_cls=None, norm_cls=nn.LayerNorm,
-                 dropout_cls=nn.Dropout, prenorm=True, resid_dropout=0.,
+                 dropout_cls=nn.Dropout, prenorm=True, resid_dropout=0., drop_path=0.,
                  fused_dropout_add_ln=False):
         super().__init__()
         self.prenorm = prenorm
@@ -30,12 +32,14 @@ class Block(nn.Module):
         if mlp_cls is None:
             mlp_cls = partial(Mlp, hidden_features=4 * dim)
         self.mixer = mixer_cls(dim)
-        self.norm1 = norm_cls(dim)
         self.dropout1 = dropout_cls(resid_dropout)
+        self.drop_path1 = StochasticDepth(drop_path, mode='row')
+        self.norm1 = norm_cls(dim)
         self.mlp = mlp_cls(dim)
         if not isinstance(self.mlp, nn.Identity):
-            self.norm2 = norm_cls(dim)
             self.dropout2 = dropout_cls(resid_dropout)
+            self.drop_path2 = StochasticDepth(drop_path, mode='row')
+            self.norm2 = norm_cls(dim)
 
         if self.fused_dropout_add_ln:
             assert dropout_add_layer_norm is not None, 'dropout_add_ln is not installed'
@@ -52,43 +56,71 @@ class Block(nn.Module):
             assert residual is not None
             mixer_out = self.mixer(hidden_states)
             if not self.fused_dropout_add_ln:
-                residual = self.dropout1(mixer_out) + residual
+                residual = self.drop_path1(self.dropout1(mixer_out)) + residual
                 hidden_states = self.norm1(residual.to(dtype=self.norm1.weight.dtype))
             else:
+                if self.drop_path1.p == 0 or not self.training:
+                    rowscale1 = None
+                else:
+                    rowscale1 = self.drop_path1(torch.ones(
+                        mixer_out.shape[:-1], device=mixer_out.device, dtype=mixer_out.dtype)
+                    )
                 hidden_states, residual = dropout_add_layer_norm(
                     mixer_out, residual, self.norm1.weight, self.norm1.bias,
-                    self.dropout1.p if self.training else 0.0, self.norm1.eps, prenorm=True
+                    self.dropout1.p if self.training else 0.0, self.norm1.eps,
+                    rowscale=rowscale1, prenorm=True
                 )
             if not isinstance(self.mlp, nn.Identity):
                 mlp_out = self.mlp(hidden_states)
                 if not self.fused_dropout_add_ln:
-                    residual = self.dropout2(mlp_out) + residual
+                    residual = self.drop_path2(self.dropout2(mlp_out)) + residual
                     hidden_states = self.norm2(residual.to(dtype=self.norm2.weight.dtype))
                 else:
+                    if self.drop_path2.p == 0 or not self.training:
+                        rowscale2 = None
+                    else:
+                        rowscale2 = self.drop_path2(torch.ones(
+                            mlp_out.shape[:-1], device=mlp_out.device, dtype=mlp_out.dtype)
+                        )
                     hidden_states, residual = dropout_add_layer_norm(
                         mlp_out, residual, self.norm2.weight, self.norm2.bias,
-                        self.dropout2.p if self.training else 0.0, self.norm2.eps, prenorm=True
+                        self.dropout2.p if self.training else 0.0, self.norm2.eps,
+                        rowscale=rowscale2, prenorm=True
                     )
             return hidden_states, residual
         else:
             assert residual is None
             mixer_out = self.mixer(hidden_states)
             if not self.fused_dropout_add_ln:
-                hidden_states = self.norm1((self.dropout1(mixer_out)
+                hidden_states = self.norm1((self.drop_path1(self.dropout1(mixer_out))
                                             + hidden_states).to(dtype=self.norm1.weight.dtype))
             else:
+                if self.drop_path1.p == 0 or not self.training:
+                    rowscale1 = None
+                else:
+                    rowscale1 = self.drop_path1(torch.ones(
+                        mixer_out.shape[:-1], device=mixer_out.device, dtype=mixer_out.dtype)
+                    )
                 hidden_states = dropout_add_layer_norm(
                     mixer_out, hidden_states, self.norm1.weight, self.norm1.bias,
-                    self.dropout1.p if self.training else 0.0, self.norm1.eps, prenorm=False
+                    self.dropout1.p if self.training else 0.0, self.norm1.eps,
+                    rowscale=rowscale1, prenorm=False
                 )
             if not isinstance(self.mlp, nn.Identity):
                 mlp_out = self.mlp(hidden_states)
                 if not self.fused_dropout_add_ln:
-                    hidden_states = self.norm2((self.drop_path(self.dropout2(mlp_out))
+                    hidden_states = self.norm2((self.drop_path2(self.dropout2(mlp_out))
                                                 + hidden_states).to(dtype=self.norm2.weight.dtype))
                 else:
+                    if self.drop_path2.p == 0 or not self.training:
+                        rowscale2 = None
+                    else:
+                        rowscale2 = self.drop_path2(torch.ones(
+                            mlp_out.shape[:-1], device=mlp_out.device, dtype=mlp_out.dtype)
+                        )
                     hidden_states = dropout_add_layer_norm(
                         mlp_out, hidden_states, self.norm2.weight, self.norm2.bias,
-                        self.dropout2.p if self.training else 0.0, self.norm2.eps, prenorm=False
+                        self.dropout2.p if self.training else 0.0, self.norm2.eps,
+                        rowscale=rowscale2, prenorm=False
                     )
             return hidden_states

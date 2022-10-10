@@ -2,7 +2,7 @@
 
 namespace layer_norm {
 
-template<typename Ktraits, bool Prenorm, bool Is_dropout, bool Has_residual>
+template<typename Ktraits, bool Prenorm, bool Is_dropout, bool Has_residual, bool Has_rowscale>
 __global__ __launch_bounds__(Ktraits::THREADS_PER_CTA) 
 void ln_bwd_kernel(layer_norm::BwdParams params) {
 
@@ -17,6 +17,7 @@ void ln_bwd_kernel(layer_norm::BwdParams params) {
     enum { THREADS_PER_WARP = Ktraits::THREADS_PER_WARP };
     enum { CTAS_PER_ROW = Ktraits::CTAS_PER_ROW };
 
+    using input_t = typename Ktraits::input_t;
     using compute_t = typename Ktraits::compute_t;
     using index_t = typename Ktraits::index_t;
     using mask_t = typename Ktraits::mask_t;
@@ -73,6 +74,7 @@ void ln_bwd_kernel(layer_norm::BwdParams params) {
     for( int row = r; row < params.rows; row += params.ctas_per_col * ROWS_PER_CTA ) {
         const compute_t mu_r = static_cast<const compute_t *>(params.mu)[row];
         const compute_t rs_r = static_cast<const compute_t *>(params.rs)[row];
+        const compute_t rowscale_val = Has_rowscale ? compute_t(static_cast<const input_t *>(params.rowscale)[row]) : 1.0f;
         Rvec x[LDGS];
         Mvec dmask[LDGS];
         Ovec dz[LDGS];
@@ -129,10 +131,11 @@ void ln_bwd_kernel(layer_norm::BwdParams params) {
                 compute_t dx_tmp = rs_r * (dy_tmp - (mdyy_local * y_tmp + mdy_local));
                 compute_t dx_tmp_res = Prenorm ? dx_tmp + compute_t(dx[it].data.elt[jt]) : dx_tmp;
                 if (Has_residual) { dx1[it].data.elt[jt] = dx_tmp_res; }
+                compute_t dx0_tmp_res = Has_rowscale ? dx_tmp_res * rowscale_val : dx_tmp_res;
                 if (Is_dropout) {
-                    dx0[it].data.elt[jt] = dmask[it].data.elt[jt] ? dx_tmp_res * params.dropout_scale : 0.f;
+                    dx0[it].data.elt[jt] = dmask[it].data.elt[jt] ? dx0_tmp_res * params.dropout_scale : 0.f;
                 } else {
-                    dx0[it].data.elt[jt] = dx_tmp_res;
+                    dx0[it].data.elt[jt] = dx0_tmp_res;
                 }
             }
             if (Has_residual) { dx1[it].store_to(params.dx1, idx); }
