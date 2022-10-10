@@ -1,0 +1,19 @@
+# @package _global_
+defaults:
+  - /experiment/imagenet/deit/base.yaml
+  # TD [2022-05-27]: the DeiT paper says they don't use EMA but I'm only able to
+  # replicate their numbers with EMA
+  - override /callbacks: [default, ema, flop-count]
+
+model:
+  _target_: timm.models.vit_base_patch16_224
+  drop_path_rate: 0.1
+  num_classes: ${datamodule:num_classes}
+
+datamodule:
+  # RepeatedAug is crucial for ViT-B as it seems to overfit.
+  num_aug_repeats: 3
+
+callbacks:
+  ema:
+    decay: 0.99996

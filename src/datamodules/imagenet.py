@@ -5,6 +5,7 @@ from typing import Any, List, Union, Callable, Optional
 
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.dataloader import default_collate
+from torch.utils.data.distributed import DistributedSampler
 
 from pytorch_lightning import LightningDataModule
 
@@ -188,11 +189,15 @@ class ImagenetDataModule(LightningDataModule):
 
     def val_dataloader(self, *args: Any, **kwargs: Any) -> Union[DataLoader, List[DataLoader]]:
         """ The val dataloader """
-        return self._data_loader(self.dataset_val, batch_size=self.batch_size_eval)
+        # If using RepeatAugment, we set trainer.replace_sampler_ddp=False, so we have to
+        # construct the DistributedSampler ourselves.
+        sampler = DistributedSampler(self.dataset_val) if self.num_aug_repeats != 0 else None
+        return self._data_loader(self.dataset_val, batch_size=self.batch_size_eval, sampler=sampler)
 
     def test_dataloader(self, *args: Any, **kwargs: Any) -> Union[DataLoader, List[DataLoader]]:
         """ The test dataloader """
-        return self._data_loader(self.dataset_test, batch_size=self.batch_size_eval)
+        sampler = DistributedSampler(self.dataset_test) if self.num_aug_repeats != 0 else None
+        return self._data_loader(self.dataset_test, batch_size=self.batch_size_eval, sampler=sampler)
 
     def _data_loader(self, dataset: Dataset, batch_size: int, shuffle: bool = False,
                      mixup: Optional[Callable] = None, sampler=None) -> DataLoader:

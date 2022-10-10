@@ -1,0 +1,15 @@
+# @package _global_
+defaults:
+  - /experiment/imagenet/deit/base.yaml
+
+seed: 1111
+
+model:
+  _target_: timm.models.vit_small_patch16_224
+  drop_path_rate: 0.1
+  num_classes: ${datamodule:num_classes}
+
+datamodule:
+  # DeiT paper says they use RepeatedAug, but I get 79.7% with RepeatedAug and
+  # 80.1% without.
+  num_aug_repeats: 0

@@ -1,0 +1,17 @@
+# @package _global_
+defaults:
+  - /experiment/imagenet/deit/deit-b.yaml
+  - override /optimizer: adamw-apex
+  - override /callbacks: [default, ema]
+
+model:
+  _target_: src.models.vit.vit.vit_base_patch16_224
+  drop_path_rate: 0.1
+  use_flash_attn: True
+  fused_bias_fc: True
+  fused_dense_gelu_dense: True
+  fused_dropout_add_ln: True
+  bf16: ${eval:'"${trainer.precision}" == "bf16"'}
+
+# trainer:
+#   strategy: deepspeed_stage_1
